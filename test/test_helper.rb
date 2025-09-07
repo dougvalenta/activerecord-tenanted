@@ -111,6 +111,7 @@ module ActiveRecord
               ActiveRecord::Migration.verbose = @migration_verbose_was
               ActiveRecord::Base.configurations = @old_configurations
               ActiveRecord::Tasks::DatabaseTasks.db_dir = @old_db_dir
+              ActiveRecord::Base.connection_handler.clear_all_connections!
               ActiveRecord::Base.connection_handler = ActiveRecord::Base.default_connection_handler = @old_connection_handler
               FileUtils.remove_entry ephemeral_path
             end

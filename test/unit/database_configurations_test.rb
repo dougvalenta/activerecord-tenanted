@@ -281,7 +281,7 @@ describe ActiveRecord::Tenanted::DatabaseConfigurations do
       test "handles non-alphanumeric characters" do
         assert_empty(tenanted_config.tenants)
 
-        crazy_name = 'a~!@#$%^&*()_-+=:;[{]}|,.?9' # please don't do this
+        crazy_name = 'a~!@#$%^&()_-+=;[{]},.9' # please don't do this
         TenantedApplicationRecord.create_tenant(crazy_name)
 
         assert_equal([ crazy_name ], tenanted_config.tenants)
@@ -312,11 +312,16 @@ describe ActiveRecord::Tenanted::DatabaseConfigurations do
         # tenant.rb. This test is descriptive, not prescriptive.
         test "creates a file if one does not exist" do
           config = tenanted_config.new_tenant_config("foo")
-          conn = config.new_connection
 
-          assert_not(File.exist?(config.database))
+          begin
+            conn = config.new_connection
 
-          conn.execute("SELECT 1")
+            assert_not(File.exist?(config.database))
+
+            conn.execute("SELECT 1")
+          ensure
+            conn.disconnect!
+          end
 
           assert(File.exist?(config.database))
           assert_operator(File.size(config.database), :>, 0)

@@ -27,10 +27,12 @@ module ActiveRecord
             path = lock_file_path(database_path)
             FileUtils.mkdir_p(File.dirname(path))
 
-            # mode "w" to create the file if it does not exist.
-            File.open(path, "w") do |f|
-              f.flock(File::LOCK_EX) # blocking!
-              yield
+            begin
+              # mode "w" to create the file if it does not exist.
+              File.open(path, "w") do |f|
+                f.flock(File::LOCK_EX) # blocking!
+                yield
+              end
             ensure
               File.unlink(path)
             end
