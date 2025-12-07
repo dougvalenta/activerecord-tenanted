@@ -1,5 +1,7 @@
 name: ci
 
+permissions: read-all
+
 concurrency:
   group: "${{github.workflow}}-${{github.ref}}"
   cancel-in-progress: true
@@ -18,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@d5126b9b3579e429dd52e51e68624dda2e05be25 # v1.267.0
         with:
           ruby-version: "3.4"
           bundler-cache: true
@@ -28,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@d5126b9b3579e429dd52e51e68624dda2e05be25 # v1.267.0
         with:
           ruby-version: "3.4"
           bundler-cache: true
@@ -38,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@d5126b9b3579e429dd52e51e68624dda2e05be25 # v1.267.0
         with:
           ruby-version: "3.4"
           bundler-cache: true

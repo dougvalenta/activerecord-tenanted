@@ -26,10 +26,8 @@ Gem::Specification.new do |spec|
     Dir["{app,config,db,lib}/**/*", "MIT-LICENSE", "Rakefile", "README.md"]
   end
 
-  rails_requirement = ">= 8.1.alpha"
+  rails_requirement = ">= 8.1.beta"
   spec.add_dependency "activerecord", rails_requirement
   spec.add_dependency "railties", rails_requirement
-
-  spec.add_dependency "rack-contrib", ">= 2.5.0"
   spec.add_dependency "zeitwerk"
 end

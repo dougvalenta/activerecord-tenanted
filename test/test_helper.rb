@@ -12,7 +12,12 @@ class TestSuiteRailtie < ::Rails::Railtie
   initializer "turn off the Rails integrations when running this test suite" do
     ActiveSupport.on_load(:active_record_tenanted) do
       Rails.application.config.active_record_tenanted.connection_class = nil
+      Rails.application.config.active_record.query_log_tags = [ :tenant ]
     end
+  end
+
+  initializer "enabled query log tags for tests" do
+    Rails.application.config.active_record.query_log_tags_enabled = true
   end
 end
 
@@ -49,6 +54,12 @@ module ActiveRecord
           end
 
           super
+        end
+
+        def for_each_db_scenario(s = all_scenarios, &block)
+          s.each_key do |db_scenario|
+            with_db_scenario(db_scenario, &block)
+          end
         end
 
         def for_each_scenario(s = all_scenarios, except: {}, &block)
@@ -178,22 +189,32 @@ module ActiveRecord
         Rails.application.config.active_record_tenanted.tenant_resolver         = @old_tenant_resolver
       end
 
+      def run(...)
+        if defined?(with_debug_event_reporting)
+          with_debug_event_reporting do
+            super
+          end
+        else
+          super
+        end
+      end
+
       def all_configs
         ActiveRecord::Base.configurations.configs_for(include_hidden: true)
       end
 
-      def tenanted_config
+      def base_config
         all_configs.find { |c| c.configuration_hash[:tenanted] }
       end
 
       def with_schema_dump_file
         FileUtils.cp "test/scenarios/schema.rb",
-                     ActiveRecord::Tasks::DatabaseTasks.schema_dump_path(tenanted_config)
+                     ActiveRecord::Tasks::DatabaseTasks.schema_dump_path(base_config)
       end
 
       def with_schema_cache_dump_file
         FileUtils.cp "test/scenarios/schema_cache.yml",
-                     ActiveRecord::Tasks::DatabaseTasks.cache_dump_filename(tenanted_config)
+                     ActiveRecord::Tasks::DatabaseTasks.cache_dump_filename(base_config)
       end
 
       def with_new_migration_file

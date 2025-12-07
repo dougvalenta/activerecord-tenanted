@@ -13,7 +13,13 @@ module ActiveRecord
       end
 
       def cache_key
-        tenant ? "#{super}?tenant=#{tenant}" : super
+        tenant ? "#{tenant}/#{super}" : super
+      end
+
+      def inspect
+        return super unless tenant
+
+        super.sub(/\A#<\S+ /, "\\0tenant: #{tenant.inspect}, ")
       end
 
       def to_global_id(options = {})
@@ -89,27 +95,35 @@ module ActiveRecord
         end
 
         def current_tenant=(tenant_name)
-          tenant_name = tenant_name.to_s unless tenant_name == UNTENANTED_SENTINEL
+          case tenant_name
+          when nil
+            tenant_name = UNTENANTED_SENTINEL
+          when UNTENANTED_SENTINEL
+            # no-op
+          else
+            tenant_name = tenant_name.to_s
+          end
 
-          connection_class_for_self.connecting_to(shard: tenant_name, role: ActiveRecord.writing_role)
+          run_callbacks :set_current_tenant do
+            connection_class_for_self.connecting_to(shard: tenant_name, role: ActiveRecord.writing_role)
+          end
         end
 
         def tenant_exist?(tenant_name)
-          # this will have to be an adapter-specific implementation if we support other than sqlite
-          database_path = tenanted_root_config.database_path_for(tenant_name)
-
-          File.exist?(database_path) && !ActiveRecord::Tenanted::Mutex::Ready.locked?(database_path)
+          tenanted_root_config.new_tenant_config(tenant_name).config_adapter.database_ready?
         end
 
         def with_tenant(tenant_name, prohibit_shard_swapping: true, &block)
           tenant_name = tenant_name.to_s unless tenant_name == UNTENANTED_SENTINEL
 
           if tenant_name == current_tenant
-            yield
+            run_callbacks :with_tenant, &block
           else
             connection_class_for_self.connected_to(shard: tenant_name, role: ActiveRecord.writing_role) do
-              prohibit_shard_swapping(prohibit_shard_swapping) do
-                log_tenant_tag(tenant_name, &block)
+              run_callbacks :with_tenant do
+                prohibit_shard_swapping(prohibit_shard_swapping) do
+                  log_tenant_tag(tenant_name, &block)
+                end
               end
             end
           end
@@ -117,24 +131,22 @@ module ActiveRecord
 
         def create_tenant(tenant_name, if_not_exists: false, &block)
           created_db = false
-          database_path = tenanted_root_config.database_path_for(tenant_name)
+          base_config = tenanted_root_config
+          adapter = base_config.new_tenant_config(tenant_name).config_adapter
 
-          ActiveRecord::Tenanted::Mutex::Ready.lock(database_path) do
-            unless File.exist?(database_path)
-              # NOTE: This is obviously a sqlite-specific implementation.
-              # TODO: Add a `create_database` method upstream in the sqlite3 adapter, and call it.
-              #       Then this would delegate to the adapter and become adapter-agnostic.
-              FileUtils.touch(database_path)
+          adapter.acquire_ready_lock do
+            unless adapter.database_exist?
+              adapter.create_database
 
               with_tenant(tenant_name) do
                 connection_pool(schema_version_check: false)
-                ActiveRecord::Tenanted::DatabaseTasks.migrate_tenant(tenant_name)
+                ActiveRecord::Tenanted::DatabaseTasks.new(base_config).migrate_tenant(tenant_name)
               end
 
               created_db = true
             end
           rescue
-            FileUtils.rm_f(database_path)
+            adapter.drop_database
             raise
           end
 
@@ -154,14 +166,11 @@ module ActiveRecord
             end
           end
 
-          # NOTE: This is obviously a sqlite-specific implementation.
-          # TODO: Create a `drop_database` method upstream in the sqlite3 adapter, and call it.
-          #       Then this would delegate to the adapter and become adapter-agnostic.
-          FileUtils.rm_f(tenanted_root_config.database_path_for(tenant_name))
+          tenanted_root_config.new_tenant_config(tenant_name).config_adapter.drop_database
         end
 
         def tenants
-          # DatabaseConfigurations::RootConfig#tenants returns all tenants whose database files
+          # DatabaseConfigurations::BaseConfig#tenants returns all tenants whose database files
           # exist, but some of those may be getting initially migrated, so we perform an additional
           # filter on readiness with `tenant_exist?`.
           tenanted_root_config.tenants.select { |t| tenant_exist?(t) }
@@ -202,21 +211,17 @@ module ActiveRecord
           ActiveRecord::Base.configurations.resolve(tenanted_config_name.to_sym)
         end
 
-        def tenanted_config_name # :nodoc:
-          @tenanted_config_name ||= (superclass.respond_to?(:tenanted_config_name) ? superclass.tenanted_config_name : nil)
-        end
-
         def _create_tenanted_pool(schema_version_check: true) # :nodoc:
           # ensure all classes use the same connection pool
           return superclass._create_tenanted_pool unless connection_class?
 
           tenant = current_tenant
-          unless File.exist?(tenanted_root_config.database_path_for(tenant))
-            raise TenantDoesNotExistError, "The database file for tenant #{tenant.inspect} does not exist."
-          end
+          db_config = tenanted_root_config.new_tenant_config(tenant)
 
-          config = tenanted_root_config.new_tenant_config(tenant)
-          pool = establish_connection(config)
+          unless db_config.config_adapter.database_exist?
+            raise TenantDoesNotExistError, "The database for tenant #{tenant.inspect} does not exist."
+          end
+          pool = establish_connection(db_config)
 
           if schema_version_check
             pending_migrations = pool.migration_context.open.pending_migrations
@@ -228,10 +233,24 @@ module ActiveRecord
 
         private
           def retrieve_connection_pool(strict:)
-            connection_handler.retrieve_connection_pool(connection_specification_name,
-                                                        role: current_role,
-                                                        shard: current_tenant,
-                                                        strict: strict)
+            role = current_role
+            shard = current_tenant
+            connection_handler.retrieve_connection_pool(connection_specification_name, role:, shard:, strict:).tap do |pool|
+              if pool
+                tenanted_connection_pools[[ shard, role ]] = pool
+                reap_connection_pools
+              end
+            end
+          end
+
+          def reap_connection_pools
+            while tenanted_connection_pools.size > tenanted_root_config.max_connection_pools
+              info, _ = *tenanted_connection_pools.pop
+              shard, role = *info
+
+              connection_handler.remove_connection_pool(connection_specification_name, role:, shard:)
+              Rails.logger.info "  REAPED [tenant=#{shard} role=#{role}] Tenanted connection pool reaped to limit total connection pools"
+            end
           end
 
           def log_tenant_tag(tenant_name, &block)
@@ -247,6 +266,13 @@ module ActiveRecord
         self.default_shard = ActiveRecord::Tenanted::Tenant::UNTENANTED_SENTINEL
 
         prepend TenantCommon
+        extend ActiveSupport::Callbacks
+
+        cattr_accessor :tenanted_config_name
+        cattr_accessor(:tenanted_connection_pools) { LRU.new }
+
+        define_callbacks :with_tenant
+        define_callbacks :set_current_tenant
       end
 
       def tenanted?

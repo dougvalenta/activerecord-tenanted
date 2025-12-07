@@ -4,6 +4,9 @@ require "active_record"
 
 require "zeitwerk"
 loader = Zeitwerk::Loader.for_gem_extension(ActiveRecord)
+loader.inflector.inflect(
+  "sqlite" => "SQLite",
+)
 loader.setup
 
 module ActiveRecord
@@ -35,9 +38,21 @@ module ActiveRecord
     # Raised when the Rails integration is being invoked but has not been configured.
     class IntegrationNotConfiguredError < Error; end
 
+    # Raised when an unsupported database adapter is used.
+    class UnsupportedDatabaseError < Error; end
+
+    # Return the constantized connection class configured in `config.active_record_tenanted.connection_class`,
+    # or nil if none is configured.
     def self.connection_class
       # TODO: cache this / speed this up
       Rails.application.config.active_record_tenanted.connection_class&.constantize
+    end
+
+    # Return an Array of the tenanted database configurations.
+    def self.base_configs(configurations = ActiveRecord::Base.configurations)
+      configurations
+        .configs_for(env_name: ActiveRecord::Tasks::DatabaseTasks.env, include_hidden: true)
+        .select { |c| c.configuration_hash[:tenanted] }
     end
   end
 end

@@ -3,62 +3,53 @@
 require "test_helper"
 
 describe ActiveRecord::Tenanted::DatabaseTasks do
-  describe ".root_database_config" do
-    for_each_scenario do
-      test "returns the tenanted database configuration" do
-        assert_equal(tenanted_config, ActiveRecord::Tenanted::DatabaseTasks.root_database_config)
-      end
-    end
-  end
-
   describe ".migrate_tenant" do
     for_each_scenario do
       setup do
-        # TODO: This should really be a create_database method on the sqlite3 adapter, see the notes
-        #       in Tenant.create_tenant.
-        FileUtils.mkdir_p(File.dirname(tenanted_config.database_path_for("foo")))
-        FileUtils.touch(tenanted_config.database_path_for("foo"))
+        base_config.new_tenant_config("foo").config_adapter.create_database
       end
 
       test "database should be created" do
-        db_path = tenanted_config.database_path_for("foo")
+        config = base_config.new_tenant_config("bar")
 
-        ActiveRecord::Tenanted::DatabaseTasks.migrate_tenant("foo")
+        assert_not_predicate(config.config_adapter, :database_exist?)
 
-        assert(File.exist?(db_path))
+        ActiveRecord::Tenanted::DatabaseTasks.new(base_config).migrate_tenant("bar")
+
+        assert_predicate(config.config_adapter, :database_exist?)
       end
 
       test "database should be migrated" do
         ActiveRecord::Migration.verbose = true
 
         assert_output(/migrating.*create_table/m, nil) do
-          ActiveRecord::Tenanted::DatabaseTasks.migrate_tenant("foo")
+          ActiveRecord::Tenanted::DatabaseTasks.new(base_config).migrate_tenant("foo")
         end
 
-        config = tenanted_config.new_tenant_config("foo")
+        config = base_config.new_tenant_config("foo")
         ActiveRecord::Tasks::DatabaseTasks.with_temporary_connection(config) do |conn|
           assert_equal(20250203191115, conn.pool.migration_context.current_version)
         end
       end
 
       test "database schema file should be created" do
-        config = tenanted_config.new_tenant_config("foo")
+        config = base_config.new_tenant_config("foo")
         schema_path = ActiveRecord::Tasks::DatabaseTasks.schema_dump_path(config)
 
         assert_not(File.exist?(schema_path))
 
-        ActiveRecord::Tenanted::DatabaseTasks.migrate_tenant("foo")
+        ActiveRecord::Tenanted::DatabaseTasks.new(base_config).migrate_tenant("foo")
 
         assert(File.exist?(schema_path))
       end
 
       test "database schema cache file should be created" do
-        config = tenanted_config.new_tenant_config("foo")
+        config = base_config.new_tenant_config("foo")
         schema_cache_path = ActiveRecord::Tasks::DatabaseTasks.cache_dump_filename(config)
 
         assert_not(File.exist?(schema_cache_path))
 
-        ActiveRecord::Tenanted::DatabaseTasks.migrate_tenant("foo")
+        ActiveRecord::Tenanted::DatabaseTasks.new(base_config).migrate_tenant("foo")
 
         assert(File.exist?(schema_cache_path))
       end
@@ -70,10 +61,10 @@ describe ActiveRecord::Tenanted::DatabaseTasks do
           ActiveRecord::Migration.verbose = true
 
           assert_silent do
-            ActiveRecord::Tenanted::DatabaseTasks.migrate_tenant("foo")
+            ActiveRecord::Tenanted::DatabaseTasks.new(base_config).migrate_tenant("foo")
           end
 
-          config = tenanted_config.new_tenant_config("foo")
+          config = base_config.new_tenant_config("foo")
           ActiveRecord::Tasks::DatabaseTasks.with_temporary_connection(config) do |conn|
             assert_equal(20250203191115, conn.pool.migration_context.current_version)
           end
@@ -86,10 +77,10 @@ describe ActiveRecord::Tenanted::DatabaseTasks do
             ActiveRecord::Migration.verbose = true
 
             assert_output(/migrating.*add_column/m, nil) do
-              ActiveRecord::Tenanted::DatabaseTasks.migrate_tenant("foo")
+              ActiveRecord::Tenanted::DatabaseTasks.new(base_config).migrate_tenant("foo")
             end
 
-            config = tenanted_config.new_tenant_config("foo")
+            config = base_config.new_tenant_config("foo")
             ActiveRecord::Tasks::DatabaseTasks.with_temporary_connection(config) do |conn|
               assert_equal(20250213005959, conn.pool.migration_context.current_version)
             end
@@ -105,10 +96,10 @@ describe ActiveRecord::Tenanted::DatabaseTasks do
           ActiveRecord::Migration.verbose = true
 
           assert_output(/migrating.*add_column/m, nil) do
-            ActiveRecord::Tenanted::DatabaseTasks.migrate_tenant("foo")
+            ActiveRecord::Tenanted::DatabaseTasks.new(base_config).migrate_tenant("foo")
           end
 
-          config = tenanted_config.new_tenant_config("foo")
+          config = base_config.new_tenant_config("foo")
           ActiveRecord::Tasks::DatabaseTasks.with_temporary_connection(config) do |conn|
             assert_equal(20250213005959, conn.pool.migration_context.current_version)
           end
@@ -130,10 +121,10 @@ describe ActiveRecord::Tenanted::DatabaseTasks do
       end
 
       test "migrates all existing tenants" do
-        ActiveRecord::Tenanted::DatabaseTasks.migrate_all
+        ActiveRecord::Tenanted::DatabaseTasks.new(base_config).migrate_all
 
         tenants.each do |tenant|
-          config = tenanted_config.new_tenant_config(tenant)
+          config = base_config.new_tenant_config(tenant)
           ActiveRecord::Tasks::DatabaseTasks.with_temporary_connection(config) do |conn|
             assert_equal(20250213005959, conn.pool.migration_context.current_version)
           end

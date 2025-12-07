@@ -69,6 +69,18 @@ describe ActiveRecord::Tenanted::Tenant do
         assert_nothing_raised { User.first }
       end
 
+      test ".current_tenant=nil clears tenant context" do
+        assert_nil(TenantedApplicationRecord.current_tenant)
+
+        TenantedApplicationRecord.current_tenant = "foo"
+
+        assert_equal("foo", TenantedApplicationRecord.current_tenant)
+
+        TenantedApplicationRecord.current_tenant = nil
+
+        assert_nil(TenantedApplicationRecord.current_tenant)
+      end
+
       test ".current_tenant= sets tenant context for a symbol" do
         TenantedApplicationRecord.create_tenant("foo")
 
@@ -101,6 +113,22 @@ describe ActiveRecord::Tenanted::Tenant do
         TenantedApplicationRecord.current_tenant = "bar"
 
         assert_equal("bar", TenantedApplicationRecord.current_tenant)
+      end
+
+      test ".current_tenant= fires callbacks" do
+        before_callback_fired = false
+        after_callback_fired = false
+        TenantedApplicationRecord.set_callback :set_current_tenant, :before do
+          before_callback_fired = true
+        end
+        TenantedApplicationRecord.set_callback :set_current_tenant, :after do
+          after_callback_fired = true
+        end
+
+        TenantedApplicationRecord.current_tenant = "foo"
+
+        assert(before_callback_fired, "Before callback should be fired")
+        assert(after_callback_fired, "After callback should be fired")
       end
 
       test "using a record after changing tenant raises WrongTenantError" do
@@ -268,6 +296,40 @@ describe ActiveRecord::Tenanted::Tenant do
         assert_raises(ActiveRecord::Tenanted::TenantDoesNotExistError) do
           TenantedApplicationRecord.with_tenant("baz") { User.count }
         end
+      end
+
+      test ".with_tenant fires callbacks" do
+        around_callback_fired = false
+        block_called = false
+        TenantedApplicationRecord.set_callback :with_tenant, :around do |_, block|
+          around_callback_fired = true
+          block.call
+        end
+
+        TenantedApplicationRecord.with_tenant("foo") do
+          block_called = true
+        end
+
+        assert(around_callback_fired, "Around callback should be fired")
+        assert(block_called, "Block should be called")
+      end
+
+      test ".with_tenant fires callbacks even when tenant doesn't change" do
+        around_callback_fired = 0
+        block_called = false
+        TenantedApplicationRecord.set_callback :with_tenant, :around do |_, block|
+          around_callback_fired += 1
+          block.call
+        end
+
+        TenantedApplicationRecord.with_tenant("foo") do
+          TenantedApplicationRecord.with_tenant("foo") do
+            block_called = true
+          end
+        end
+
+        assert_equal(2, around_callback_fired, "Around callback should be fired for each call")
+        assert(block_called, "Block should be called")
       end
     end
 
@@ -552,7 +614,9 @@ describe ActiveRecord::Tenanted::Tenant do
       end
 
       test "it returns false if the tenant database is in the process of being migrated" do
-        db_path = TenantedApplicationRecord.tenanted_root_config.database_path_for("foo")
+        # TODO: this test is SQLite-specific because it's using the Ready mutex directly.
+        config = TenantedApplicationRecord.tenanted_root_config
+        db_path = config.config_adapter.path_for(config.database_for("foo"))
 
         assert_not(TenantedApplicationRecord.tenant_exist?("foo"))
 
@@ -630,34 +694,34 @@ describe ActiveRecord::Tenanted::Tenant do
       test "creates the database" do
         assert_not(TenantedApplicationRecord.tenant_exist?("foo"))
 
-        db_path = TenantedApplicationRecord.create_tenant("foo") do
-          User.connection_db_config.database_path
+        db_config = TenantedApplicationRecord.create_tenant("foo") do
+          User.connection_db_config
         end
 
         assert(TenantedApplicationRecord.tenant_exist?("foo"))
-        assert(File.exist?(db_path))
+        assert_predicate(db_config.config_adapter, :database_exist?)
       end
 
       test "creates the database given a symbol" do
         assert_not(TenantedApplicationRecord.tenant_exist?("foo"))
 
-        db_path = TenantedApplicationRecord.create_tenant(:foo) do
-          User.connection_db_config.database_path
+        db_config = TenantedApplicationRecord.create_tenant(:foo) do
+          User.connection_db_config
         end
 
         assert(TenantedApplicationRecord.tenant_exist?("foo"))
-        assert(File.exist?(db_path))
+        assert_predicate(db_config.config_adapter, :database_exist?)
       end
 
       test "creates the database given an integer" do
         assert_not(TenantedApplicationRecord.tenant_exist?("12345678"))
 
-        db_path = TenantedApplicationRecord.create_tenant(12345678) do
-          User.connection_db_config.database_path
+        db_config = TenantedApplicationRecord.create_tenant(12345678) do
+          User.connection_db_config
         end
 
         assert(TenantedApplicationRecord.tenant_exist?("12345678"))
-        assert(File.exist?(db_path))
+        assert_predicate(db_config.config_adapter, :database_exist?)
       end
 
       test "yields the block in the context of the created tenant" do
@@ -839,13 +903,16 @@ describe ActiveRecord::Tenanted::Tenant do
       end
 
       test "it does not return tenants that are not ready" do
-        foo_db_path = TenantedApplicationRecord.tenanted_root_config.database_path_for("foo")
+        # TODO: this test is SQLite-specific because it's using the Ready mutex directly.
+        config = TenantedApplicationRecord.tenanted_root_config
+        db_path = config.config_adapter.path_for(config.database_for("foo"))
+
         TenantedApplicationRecord.create_tenant("bar")
 
-        ActiveRecord::Tenanted::Mutex::Ready.lock(foo_db_path) do
+        ActiveRecord::Tenanted::Mutex::Ready.lock(db_path) do
           assert_equal([ "bar" ], TenantedApplicationRecord.tenants)
 
-          FileUtils.touch(foo_db_path) # pretend the database was created
+          FileUtils.touch(db_path) # pretend the database was created
 
           assert_equal([ "bar" ], TenantedApplicationRecord.tenants)
         end
@@ -925,6 +992,50 @@ describe ActiveRecord::Tenanted::Tenant do
 
         assert_equal(5, success_log.size)
       end
+
+      test "connection pools are reaped when they exceed the max" do
+        max = ActiveRecord::Tenanted::DatabaseConfigurations::BaseConfig::DEFAULT_MAX_CONNECTION_POOLS
+
+        assert_equal 0, TenantedApplicationRecord.tenanted_connection_pools.size
+
+        (1..max).each { |j| TenantedApplicationRecord.create_tenant("tenant#{j}") { User.count } }
+
+        assert_equal max, TenantedApplicationRecord.tenanted_connection_pools.size
+        assert TenantedApplicationRecord.tenanted_connection_pools.keys.include?([ "tenant1", :writing ])
+        assert TenantedApplicationRecord.tenanted_connection_pools.keys.include?([ "tenant2", :writing ])
+        assert TenantedApplicationRecord.tenanted_connection_pools.keys.include?([ "tenant3", :writing ])
+
+        tenant_pools = TenantedApplicationRecord.connection_handler.connection_pools
+                         .select { |pool| pool.shard =~ /^tenant/ }
+        assert_equal max, tenant_pools.size
+
+        TenantedApplicationRecord.create_tenant "tenant-wafer-thin-mint" do
+          User.count
+
+          assert_equal max, TenantedApplicationRecord.tenanted_connection_pools.size
+          assert_not TenantedApplicationRecord.tenanted_connection_pools.keys.include?([ "tenant1", :writing ])
+          assert TenantedApplicationRecord.tenanted_connection_pools.keys.include?([ "tenant2", :writing ])
+          assert TenantedApplicationRecord.tenanted_connection_pools.keys.include?([ "tenant3", :writing ])
+
+          tenant_pools = TenantedApplicationRecord.connection_handler.connection_pools
+                           .select { |pool| pool.shard =~ /^tenant/ }
+          assert_equal max, tenant_pools.size
+        end
+
+        TenantedApplicationRecord.with_tenant("tenant2") { User.count } # so it's no longer the oldest
+
+        TenantedApplicationRecord.create_tenant "tenant-the-cheque-monsieur" do
+          User.count
+
+          assert_equal max, TenantedApplicationRecord.tenanted_connection_pools.size
+          assert TenantedApplicationRecord.tenanted_connection_pools.keys.include?([ "tenant2", :writing ])
+          assert_not TenantedApplicationRecord.tenanted_connection_pools.keys.include?([ "tenant3", :writing ])
+
+          tenant_pools = TenantedApplicationRecord.connection_handler.connection_pools
+                           .select { |pool| pool.shard =~ /^tenant/ }
+          assert_equal max, tenant_pools.size
+        end
+      end
     end
 
     for_each_scenario do
@@ -971,7 +1082,7 @@ describe ActiveRecord::Tenanted::Tenant do
           end
         end
 
-        assert_includes(log.string, "[tenant=foo]")
+        assert_includes(log.string, "tenant='foo'")
       end
     end
 
@@ -1109,7 +1220,7 @@ describe ActiveRecord::Tenanted::Tenant do
       describe "created in untenanted context" do
         setup { with_schema_cache_dump_file }
 
-        test "includes the tenant name" do
+        test "does not include the tenant name" do
           user = User.new(email: "user1@example.org")
 
           assert_equal("users/new", user.cache_key)
@@ -1122,11 +1233,42 @@ describe ActiveRecord::Tenanted::Tenant do
             User.create!(email: "user1@example.org")
           end
 
-          assert_equal("users/1?tenant=foo", user.cache_key)
+          assert_equal("foo/users/1", user.cache_key)
 
           TenantedApplicationRecord.with_tenant("foo") do
-            assert_equal("users/1?tenant=foo", User.find(user.id).cache_key)
+            assert_equal("foo/users/1", User.find(user.id).cache_key)
           end
+        end
+
+        test "handles special characters in tenant names" do
+          TenantedApplicationRecord.create_tenant("foo-bar_123") do
+            user = User.create!(email: "user1@example.org")
+            assert_equal("foo-bar_123/users/1", user.cache_key)
+          end
+        end
+      end
+    end
+  end
+
+  describe "#inspect" do
+    for_each_scenario do
+      describe "created in untenanted context" do
+        setup { with_schema_cache_dump_file }
+
+        test "does not include tenant name" do
+          user = User.new(email: "user1@example.org")
+
+          assert_no_match(/tenant=/, user.inspect)
+        end
+      end
+
+      describe "created in tenanted context" do
+        test "includes the tenant name" do
+          user = TenantedApplicationRecord.create_tenant("foo") do
+            User.create!(email: "user1@example.org")
+          end
+
+          assert_match(/\A#<User tenant: "foo", id:/, user.inspect)
         end
       end
     end
